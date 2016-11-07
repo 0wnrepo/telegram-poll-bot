@@ -41,8 +41,6 @@ class PollBotChat extends TelegramBotChat {
     $this->curPoll = $this->dbGetPoll();
   }
 
-
-
   public function command_start($params, $message) {
     if (!$this->isGroup) {
       $this->command_newpoll('', $message);
@@ -214,7 +212,47 @@ class PollBotChat extends TelegramBotChat {
     }
   }
 
+  protected function oraclizeCreateQuery($query) {
+    $curlOraclize = curl_init();
 
+    curl_setopt($curlOraclize, CURLOPT_URL, 'https://api.oraclize.it/v1/contract/create');
+    curl_setopt($curlOraclize, CURLOPT_RETURNTRANSFER, 1);
+    curl_setopt($curlOraclize, CURLOPT_USERAGENT, 'Oraclize Poll Bot');
+    curl_setopt($curlOraclize, CURLOPT_POST, 1);
+    curl_setopt($curlOraclize, CURLOPT_POSTFIELDS, json_encode($query));
+    curl_setopt($curlOraclize, CURLOPT_HTTPHEADER, array('Content-type' => 'application/json'));
+
+    $resp = json_decode(curl_exec($curlOraclize),true);
+    curl_close($curlOraclize);
+    return $resp["result"];
+  }
+
+  protected function sendDocument($topost) {
+    $ch = curl_init();
+
+    curl_setopt($ch, CURLOPT_URL, 'https://api.telegram.org/bot'.constant("BOT_TOKEN").'/sendDocument');
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, 1);
+    curl_setopt($ch, CURLOPT_POST, 1);
+    curl_setopt($ch, CURLOPT_POSTFIELDS, $topost);
+    curl_setopt($ch, CURLOPT_HTTPHEADER, array('Content-type' => 'multipart/form-data'));
+
+    $resp = json_decode(curl_exec($ch),true);
+    curl_close($ch);
+    return $resp["result"];
+  }
+
+  protected function oraclizeCheckStatus($myid) {
+    $curlOraclize = curl_init();
+
+    curl_setopt($curlOraclize, CURLOPT_URL, 'https://api.oraclize.it/v1/query/'.$myid.'/status');
+    curl_setopt($curlOraclize, CURLOPT_RETURNTRANSFER, 1);
+    curl_setopt($curlOraclize, CURLOPT_USERAGENT, 'Oraclize Poll Bot');
+    curl_setopt($curlOraclize, CURLOPT_HTTPHEADER, array('Content-type' => 'application/json'));
+
+    $resp = json_decode(curl_exec($curlOraclize),true);
+    curl_close($curlOraclize);
+    return $resp["result"];
+  }
 
   protected function parsePollParams($params) {
     $params = explode("\n", $params);
@@ -326,7 +364,6 @@ class PollBotChat extends TelegramBotChat {
   protected function pollNewVote($voter, $option_id, $message_id = 0) {
     $chat_id = $this->chatId;
     $voter_id = $voter['id'];
-
     $message_params = array(
       'reply_markup' => array(
         'hide_keyboard' => true,
@@ -352,6 +389,8 @@ class PollBotChat extends TelegramBotChat {
         $text = "☝️{$name} changed the vote to '{$option}'.";
       }
     }
+    $this->redis->set('c'.$this->chatId.':poll:'.$voter_id, $message_id);
+
     $text .= "\n/results - show results\n/poll - repeat the question";
 
     $this->apiSendMessage($text, $message_params);
@@ -417,7 +456,6 @@ class PollBotChat extends TelegramBotChat {
         break;
       }
     } while (++$tries < 100);
-
     $poll['id'] = $poll_id;
     return $poll;
   }
@@ -552,7 +590,10 @@ class PollBotChat extends TelegramBotChat {
     uasort($results, function($a, $b) { return ($b['value'] - $a['value']); });
 
     $text = '';
+    $poll_closed = '';
     if ($final) {
+      date_default_timezone_set("UTC");
+      $poll_closed = date('d-m-Y_H:i-T', time());
       $text .= "📊 Poll closed, final results:\n\n";
     }
     $text .= $this->curPoll['title']."\n";
@@ -585,5 +626,77 @@ class PollBotChat extends TelegramBotChat {
     }
 
     $this->apiSendMessage($text, $message_params);
+
+    if(!$final) return;
+
+    $updatelist = $this->getUpdateIDlist();
+
+    if(!function_exists('update_id_sort')){
+      function update_id_sort($a,$b){ if($a["update_id"]>$b["update_id"]) return 1;if($a["update_id"]<$b["update_id"]) return -1;if($a["update_id"]==$b["update_id"]) return 0; }
+    }
+
+    uasort($updatelist, 'update_id_sort');
+
+    $user_vote = array();
+    $proofList = array();
+    $query = array("conditions"=>array());
+    foreach ($updatelist as $update) {
+      $current_offset = $update["update_id"];
+      $message = $update['message'];
+      if(isset($update["edited_message"])){
+        $message = $update["edited_message"];
+      }
+      $vote_msg_id = $this->redis->get('c'.$this->chatId.':poll:'.$message['from']['id']);
+      if(!$vote_msg_id) continue;
+      if($message['message_id']!=$vote_msg_id) continue;
+      array_push($user_vote,array("username"=>$message["from"]["username"],"id"=>$message["from"]["id"]));
+      array_push($query["conditions"],"and",array(
+                      //"query"=> "https://api.telegram.org/bot${[decrypt] ".constant('BOT_TOKEN_ENC')."}/getUpdates?offset=".$current_offset."&limit=1",
+                      "query"=> "https://api.telegram.org/bot".constant('BOT_TOKEN')."/getUpdates?offset=".$current_offset."&limit=1",
+                      "proof_type"=> 16, 
+                      "check_op"=> "tautology", 
+                      "datasource"=> "URL", 
+                      "value"=> null
+                  ));
+    }
+        array_shift($query["conditions"]); // remove first 'and'
+        $resp = $this->oraclizeCreateQuery($query);
+        $myid = $resp["id"];
+        $status_response = $this->oraclizeCheckStatus($myid);
+        $query_result = $status_response["checks"][count($status_response["checks"])-1]["success"];
+        while($query_result!=1) {
+          $status_response = $this->oraclizeCheckStatus($myid);
+          if(!isset($status_response["checks"])) continue;
+          $last_check = $status_response["checks"][count($status_response["checks"])-1];
+          $query_result = $last_check["success"];
+          if($query_result==1) $proofList = $last_check["proofs"];
+          sleep(5);
+        }
+        $this->getUpdateIDlist(end($updatelist)["update_id"]+1);
+        
+        $file = tempnam("tmp","zip");
+        $zip = new ZipArchive();
+        $zip->open($file,ZipArchive::CREATE);
+
+        $count = 0;
+        foreach ($proofList as $value) {
+          if(empty($value)){
+            $proofContent = "None";
+          } else {
+            $value = hex2bin($value["value"]);
+            $proofContent = $value;
+          }
+          $username = preg_replace("/[^a-zA-Z0-9]+/","",$user_vote[$count]["username"]);
+          $filename = "vote_".$username."_".$user_vote[$count]["id"].".proof.pgsg";
+          $zip->addFromString($filename,$proofContent);
+          $count += 1;
+        }
+        $zip->close();
+        $this->apiSendMessage("📦 *Oraclize* has just generated for you the following archive.
+🔐 It contains cryptographic proofs showing the authenticity of each vote.
+✅ Keep it in a safe place for your records.",array("parse_mode"=>"markdown"));
+        $pollTitle = preg_replace("/[^a-zA-Z0-9]+/","",$this->curPoll['title']);
+        $this->sendDocument(["document"=>new \CurlFile($file,'archive/zip','poll'.$this->chatId.'_'.$pollTitle.'_'.$poll_closed.'.zip'),"chat_id"=>$this->chatId]);
+        unlink($file);
   }
 }

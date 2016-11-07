@@ -17,11 +17,11 @@ abstract class TelegramBotCore {
   protected $netDelay = 1;
 
   protected $updatesOffset = false;
-  protected $updatesLimit = 30;
-  protected $updatesTimeout = 10;
+  public $updatesLimit = 100;
+  public $updatesTimeout = 10;
 
-  protected $netTimeout = 10;
-  protected $netConnectTimeout = 5;
+  public $netTimeout = 10;
+  public $netConnectTimeout = 5;
 
   public function __construct($token, $options = array()) {
     $options += array(
@@ -132,9 +132,6 @@ abstract class TelegramBotCore {
       'limit' => $this->updatesLimit,
       'timeout' => $this->updatesTimeout,
     );
-    if ($this->updatesOffset) {
-      $params['offset'] = $this->updatesOffset;
-    }
     $options = array(
       'timeout' => $this->netConnectTimeout + $this->updatesTimeout + 2,
     );
@@ -143,6 +140,9 @@ abstract class TelegramBotCore {
       $updates = $response['result'];
       if (is_array($updates)) {
         foreach ($updates as $update) {
+          if($update['update_id']<$this->updatesOffset && $this->updatesOffset!=false){
+            continue;
+          }
           $this->updatesOffset = $update['update_id'] + 1;
           $this->onUpdateReceived($update);
         }
@@ -171,7 +171,11 @@ class TelegramBot extends TelegramBotCore {
   }
 
   public function onUpdateReceived($update) {
-    if ($update['message']) {
+    if(isset($update['edited_message'])){
+      $message = $update['edited_message'];
+      $update['message'] = $message;
+    }
+    if($update['message']) {
       $message = $update['message'];
       $chat_id = intval($message['chat']['id']);
       if ($chat_id) {
@@ -197,6 +201,7 @@ class TelegramBot extends TelegramBotCore {
             $command = $matches[1];
             $command_owner = strtolower($matches[2]);
             $command_params = $matches[3];
+            
             if (!$command_owner || $command_owner == $username) {
               $method = 'command_'.$command;
               if (method_exists($chat, $method)) {
@@ -254,6 +259,26 @@ abstract class TelegramBotChat {
       'text' => $text,
     );
     return $this->core->request('sendMessage', $params);
+  }
+
+  protected function getUpdateIDlist($offset = false){
+    $params = array(
+      'limit' => $this->core->updatesLimit,
+      'timeout' => $this->core->updatesTimeout,
+    );
+    $options = array(
+      'timeout' => $this->core->netConnectTimeout + $this->core->updatesTimeout + 2,
+    );
+    if($offset!=false){
+      $params['offset'] = $offset;
+    }
+    $response = $this->core->request('getUpdates', $params, $options);
+    if ($response['ok']) {
+      $updates = $response['result'];
+      if (is_array($updates)) {
+        return $updates;
+      }
+    }
   }
 
 }
