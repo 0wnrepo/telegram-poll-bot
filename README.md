@@ -8,3 +8,5 @@ You can see a working instance of this bot here:<br/>
 
 Read more about Telegram bots:<br/>
 [https://core.telegram.org/bots](https://core.telegram.org/bots)
+
+Requires gearman pecl extension

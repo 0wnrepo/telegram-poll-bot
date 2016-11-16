@@ -31,10 +31,13 @@ class PollBotChat extends TelegramBotChat {
 
   protected $curPoll = false;
   protected static $optionsLimit = 10;
+  public $client;
 
   public function __construct($core, $chat_id) {
     parent::__construct($core, $chat_id);
     $this->redis = $this->core->redis;
+    $this->client = new GearmanClient();
+    $this->client->addServer();
   }
 
   public function init() {
@@ -220,33 +223,6 @@ class PollBotChat extends TelegramBotChat {
     curl_setopt($curlOraclize, CURLOPT_USERAGENT, 'Oraclize Poll Bot');
     curl_setopt($curlOraclize, CURLOPT_POST, 1);
     curl_setopt($curlOraclize, CURLOPT_POSTFIELDS, json_encode($query));
-    curl_setopt($curlOraclize, CURLOPT_HTTPHEADER, array('Content-type' => 'application/json'));
-
-    $resp = json_decode(curl_exec($curlOraclize),true);
-    curl_close($curlOraclize);
-    return $resp["result"];
-  }
-
-  protected function sendDocument($topost) {
-    $ch = curl_init();
-
-    curl_setopt($ch, CURLOPT_URL, 'https://api.telegram.org/bot'.constant("BOT_TOKEN").'/sendDocument');
-    curl_setopt($ch, CURLOPT_RETURNTRANSFER, 1);
-    curl_setopt($ch, CURLOPT_POST, 1);
-    curl_setopt($ch, CURLOPT_POSTFIELDS, $topost);
-    curl_setopt($ch, CURLOPT_HTTPHEADER, array('Content-type' => 'multipart/form-data'));
-
-    $resp = json_decode(curl_exec($ch),true);
-    curl_close($ch);
-    return $resp["result"];
-  }
-
-  protected function oraclizeCheckStatus($myid) {
-    $curlOraclize = curl_init();
-
-    curl_setopt($curlOraclize, CURLOPT_URL, 'https://api.oraclize.it/v1/query/'.$myid.'/status');
-    curl_setopt($curlOraclize, CURLOPT_RETURNTRANSFER, 1);
-    curl_setopt($curlOraclize, CURLOPT_USERAGENT, 'Oraclize Poll Bot');
     curl_setopt($curlOraclize, CURLOPT_HTTPHEADER, array('Content-type' => 'application/json'));
 
     $resp = json_decode(curl_exec($curlOraclize),true);
@@ -638,7 +614,6 @@ class PollBotChat extends TelegramBotChat {
     uasort($updatelist, 'update_id_sort');
 
     $user_vote = array();
-    $proofList = array();
     $query = array("conditions"=>array());
     foreach ($updatelist as $update) {
       $current_offset = $update["update_id"];
@@ -662,41 +637,13 @@ class PollBotChat extends TelegramBotChat {
         array_shift($query["conditions"]); // remove first 'and'
         $resp = $this->oraclizeCreateQuery($query);
         $myid = $resp["id"];
-        $status_response = $this->oraclizeCheckStatus($myid);
-        $query_result = $status_response["checks"][count($status_response["checks"])-1]["success"];
-        while($query_result!=1) {
-          $status_response = $this->oraclizeCheckStatus($myid);
-          if(!isset($status_response["checks"])) continue;
-          $last_check = $status_response["checks"][count($status_response["checks"])-1];
-          $query_result = $last_check["success"];
-          if($query_result==1) $proofList = $last_check["proofs"];
-          sleep(5);
-        }
-        $this->getUpdateIDlist(end($updatelist)["update_id"]+1);
-        
-        $file = tempnam("tmp","zip");
-        $zip = new ZipArchive();
-        $zip->open($file,ZipArchive::CREATE);
-
-        $count = 0;
-        foreach ($proofList as $value) {
-          if(empty($value)){
-            $proofContent = "None";
-          } else {
-            $value = hex2bin($value["value"]);
-            $proofContent = $value;
-          }
-          $username = preg_replace("/[^a-zA-Z0-9]+/","",$user_vote[$count]["username"]);
-          $filename = "vote_".$username."_".$user_vote[$count]["id"].".proof.pgsg";
-          $zip->addFromString($filename,$proofContent);
-          $count += 1;
-        }
-        $zip->close();
-        $this->apiSendMessage("📦 *Oraclize* has just generated for you the following archive.
-🔐 It contains cryptographic proofs showing the authenticity of each vote.
-✅ Keep it in a safe place for your records.",array("parse_mode"=>"markdown"));
-        $pollTitle = preg_replace("/[^a-zA-Z0-9]+/","",$this->curPoll['title']);
-        $this->sendDocument(["document"=>new \CurlFile($file,'archive/zip','poll'.$this->chatId.'_'.$pollTitle.'_'.$poll_closed.'.zip'),"chat_id"=>$this->chatId]);
-        unlink($file);
+        $this->client->doBackground("oraclizeCheckStatus", json_encode(array(
+          'myid' => $myid,
+          'reset_offset' => end($updatelist)["update_id"]+1,
+          'chatId' => $this->chatId,
+          'thisPoll' => $this->curPoll['title'],
+          'poll_closed' => $poll_closed,
+          'user_vote' => $user_vote
+        )));
   }
 }
