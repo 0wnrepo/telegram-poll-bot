@@ -5,7 +5,8 @@ $worker = new GearmanWorker();
 $worker->addServer();
 
 function checkStatus($myid){
-	$curlOraclize = curl_init();
+    echo "Checking ".$myid."\n";
+    $curlOraclize = curl_init();
 
     curl_setopt($curlOraclize, CURLOPT_URL, 'https://api.oraclize.it/v1/contract/'.$myid.'/status');
     curl_setopt($curlOraclize, CURLOPT_RETURNTRANSFER, 1);
@@ -18,7 +19,7 @@ function checkStatus($myid){
 }
 
 function resetOffset($offset){
-	$ch = curl_init();
+    $ch = curl_init();
 
     curl_setopt($ch, CURLOPT_URL, "https://api.telegram.org/bot".constant('BOT_TOKEN')."/getUpdates?offset=".$offset."&limit=1");
     curl_setopt($ch, CURLOPT_RETURNTRANSFER, 1);
@@ -70,14 +71,19 @@ $worker->addFunction("oraclizeCheckStatus", function(GearmanJob $job) {
     $thisPoll = $workload->thisPoll;
     $user_vote = json_decode(json_encode($workload->user_vote),true);
     $status_response = checkStatus($myid);
-    $query_result = $status_response["checks"][count($status_response["checks"])-1]["success"];
+    $query_result = true;
     $proofList = array();
-    while($query_result!=1) {
-      $status_response = checkStatus($myid);
-      if(!isset($status_response["checks"])) continue;
-      $last_check = $status_response["checks"][count($status_response["checks"])-1];
-      $query_result = $last_check["success"];
-      if($query_result==1) $proofList = $last_check["proofs"];
+    while($query_result==true) {
+	$status_response = checkStatus($myid);
+	if(isset($status_response["checks"])){
+	try {
+	    $last_check = $status_response["checks"][count($status_response["checks"])-1];
+      	    $query_result = $status_response["active"];
+      	    if($query_result==false) $proofList = $last_check["proofs"];
+	} catch (Exception $e) {
+	    echo 'Caught exception: ',  $e->getMessage(), "\n";
+	}
+      }
       sleep(5);
     }
     resetOffset($workload->reset_offset);
@@ -89,7 +95,7 @@ $worker->addFunction("oraclizeCheckStatus", function(GearmanJob $job) {
     $count = 0;
     foreach ($proofList as $value) {
       if(empty($value)){
-        $proofContent = "None";
+        $proofContent = "";
       } else {
     	$value = hex2bin($value["value"]);
         $proofContent = $value;
